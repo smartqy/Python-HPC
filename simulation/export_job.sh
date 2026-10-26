@@ -3,7 +3,7 @@
 # 4571 buildings / 200 = 23 batches. Each element writes data/landing/*/batch_id=<n>/ and can be
 # re-submitted on its own (e.g. bsub -J "export[7]") because a batch is overwritten in place.
 #   bsub < simulation/export_job.sh
-#BSUB -q c02613
+#BSUB -q gpua10
 #BSUB -J export[1-23]
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
