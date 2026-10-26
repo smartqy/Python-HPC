@@ -1,0 +1,13 @@
+dataset,buildings,blocks,raw_parquet_mb,engine,runs,median_job_s,median_wall_s
+data/landing,20,2091,10.5,pandas,3,0.18,0.71
+data/landing,20,2091,10.5,spark_rows,3,6.04,11.63
+data/landing,20,2091,10.5,spark_files,3,7.06,11.69
+data/scaled/x10/landing,200,20910,105.5,pandas,3,1.31,1.76
+data/scaled/x10/landing,200,20910,105.5,spark_rows,3,8.28,13.75
+data/scaled/x10/landing,200,20910,105.5,spark_files,3,13.6,19.59
+data/scaled/x50/landing,1000,104550,527.4,pandas,3,6.65,7.22
+data/scaled/x50/landing,1000,104550,527.4,spark_rows,3,21.73,27.16
+data/scaled/x50/landing,1000,104550,527.4,spark_files,3,14.68,19.74
+data/scaled/x230/landing,4600,480930,2426.0,pandas,3,33.6,34.19
+data/scaled/x230/landing,4600,480930,2426.0,spark_rows,3,76.59,82.3
+data/scaled/x230/landing,4600,480930,2426.0,spark_files,3,38.98,44.77
