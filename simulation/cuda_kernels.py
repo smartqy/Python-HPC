@@ -1,8 +1,12 @@
 """Numba CUDA kernels for export.py's CudaSolver. Imported lazily so CPU-only machines never
 touch numba.cuda. Numba only - see CudaSolver for why CuPy must not be used alongside."""
-from numba import cuda, float64
+import numpy as np
+from numba import cuda
 
 TPB = 16  # threads per block along each axis
+# Shared-array sizes must be compile-time constants; a global is frozen as a literal, while the
+# expression TPB * TPB inside the kernel is typed as a runtime int64 and rejected by numba-cuda.
+BLOCK_THREADS = TPB * TPB
 
 
 @cuda.jit
@@ -16,7 +20,7 @@ def jacobi_kernel(u_old, u_new, interior_mask):
 @cuda.jit
 def max_abs_diff_kernel(a, b, out):
     # Max-reduce |a - b| within the block in shared memory, then one atomic per block.
-    buf = cuda.shared.array(TPB * TPB, float64)
+    buf = cuda.shared.array(BLOCK_THREADS, np.float64)
     i, j = cuda.grid(2)
     t = cuda.threadIdx.x * TPB + cuda.threadIdx.y
     d = 0.0
@@ -24,7 +28,7 @@ def max_abs_diff_kernel(a, b, out):
         d = abs(a[i, j] - b[i, j])
     buf[t] = d
     cuda.syncthreads()
-    s = TPB * TPB // 2
+    s = BLOCK_THREADS // 2
     while s > 0:
         if t < s and buf[t + s] > buf[t]:
             buf[t] = buf[t + s]
