@@ -1,0 +1,16 @@
+query,table,partition_by,files,partition_pruning,median_ms
+q1_area_by_temp_band,dim,none,1,False,320.7
+q1_area_by_temp_band,dim,temp_band,2,False,190.9
+q1_area_by_temp_band,dim,area_band,3,False,151.2
+q2_slowest_convergence_top50,dim,none,1,False,58.1
+q2_slowest_convergence_top50,dim,temp_band,2,False,78.3
+q2_slowest_convergence_top50,dim,area_band,3,False,53.1
+q3_cold_blocks_in_warm_buildings,fact,none,3,False,114.1
+q3_cold_blocks_in_warm_buildings,fact,batch_id,920,False,988.9
+q3_cold_blocks_in_warm_buildings,fact,temp_band,2,True,168.2
+q4_large_building_heatmap,fact,none,3,False,153.0
+q4_large_building_heatmap,fact,batch_id,920,False,979.9
+q4_large_building_heatmap,fact,temp_band,2,False,131.8
+q5_single_batch_cold_share,fact,none,3,False,139.5
+q5_single_batch_cold_share,fact,batch_id,920,True,114.7
+q5_single_batch_cold_share,fact,temp_band,2,False,108.2

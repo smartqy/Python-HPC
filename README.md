@@ -123,18 +123,20 @@ flowchart LR
     RC --> Q
 ```
 
-全量 4,571 栋建筑的仿真在 DTU 的 GPU 节点上跑（[simulation/export_job.sh](simulation/export_job.sh)，23 个数组任务，每个任务 200 栋）。本地 Docker 环境中，DAG 的第一个任务用 Numba 在 CPU 上计算仓库自带的 20 栋样例建筑，所以不需要 GPU 也能跑通整条管道。
+全量 4,571 栋建筑的仿真在 DTU 的 GPU 节点（`gpua10` 队列）上跑：[simulation/export_job.sh](simulation/export_job.sh) 提交 23 个数组任务，每个任务 200 栋，全部一次成功。每栋平均求解 0.45 s，99.76% 的建筑在 2 万次迭代内收敛，共写出 2.6 GB 原始层。本地 Docker 环境中，DAG 的第一个任务用 Numba 在 CPU 上计算仓库自带的 20 栋样例建筑，所以不需要 GPU 也能跑通整条管道。
 
 ## 数据模型
 
-| 层 | 表 | 粒度 | 样例实测行数（20 栋） |
-|---|---|---|---:|
-| 原始 | landing/raw_grid | 每栋建筑 1 行（2 MB 温度场 + 掩码） | 20 |
-| 原始 | landing/convergence | 每栋 × 每 100 次迭代 | 1,467 |
-| 清洗 | dw.fact_block_temp | 每栋 × 含室内格点的 32×32 区块 | 2,091（过滤掉 3,029 个空区块） |
-| 清洗 | dw.fact_convergence | 同 landing | 1,467 |
-| 汇总 | dw.dim_building_summary | 每栋 1 行 | 20 |
-| 运维 | dw.dq_results、dw.etl_batch_log | 批次 × 检查项 / 批次 | 60 / 4 |
+| 层 | 表 | 粒度 | 全量实测（4,571 栋，23 批） | 样例（20 栋） |
+|---|---|---|---:|---:|
+| 原始 | landing/raw_grid | 每栋建筑 1 行（2 MB 温度场 + 掩码） | 4,571 行，2.6 GB | 20 |
+| 原始 | landing/convergence | 每栋 × 每 100 次迭代 | 399,751 行 | 1,467 |
+| 清洗 | dw.fact_block_temp | 每栋 × 含室内格点的 32×32 区块 | 539,744 行，23 MB | 2,091 |
+| 清洗 | dw.fact_convergence | 同 landing | 399,751 行，9.6 MB | 1,467 |
+| 汇总 | dw.dim_building_summary | 每栋 1 行 | 4,571 行，0.5 MB | 20 |
+| 运维 | dw.dq_results、dw.etl_batch_log | 批次 × 检查项 / 批次 | 345 / 23 | 60 / 4 |
+
+清洗后的数仓总共约 33 MB，是原始层的 1/80。每张表每个批次只有 1 个 Parquet 文件。
 
 字段定义、单位和清洗规则见 [docs/data_dictionary.md](docs/data_dictionary.md)。几个关键设计：
 
@@ -146,13 +148,18 @@ flowchart LR
 
 每个阶段的检查结果都写入 `dw.dq_results`，状态分为 PASS / WARN / FAIL。出现 FAIL 时任务以退出码 2 结束，Airflow 会重试并在日志中告警；该批次不会被 commit，下一次调度时会自动重新处理。
 
-| 检查 | 阶段 | 结果（样例数据） |
+| 检查 | 阶段 | 结果（全量 4,571 栋） |
 |---|---|---|
 | landing schema 与预期完全一致 | validate | PASS |
-| 温度场字节长度、建筑在三张表之间的完整性、重复 ID | validate | PASS（注入一条截断的温度场后正确 FAIL，退出码 2） |
-| 室内温度落在物理范围 [0, 25] °C 内且不为 NaN，否则整栋建筑进入隔离表 | blocks | PASS |
-| 掩码泄漏：室内格点紧邻建筑外部（0 °C）而非墙体 | blocks | **WARN：20 栋中有 16 栋** |
-| **Spark 汇总 vs 仿真脚本的 `summary_stats()`，逐栋比对** | reconcile | **20/20 一致，最大绝对误差 4×10⁻¹⁴（阈值 1×10⁻⁶）** |
+| 温度场字节长度、建筑在三张表之间的完整性、重复 ID | validate | PASS（在样例上注入一条截断的温度场后正确 FAIL，退出码 2） |
+| 未收敛：跑满 2 万次迭代仍未达到 atol | validate | **WARN：11 栋，分布在 8 个批次** |
+| 室内温度落在物理范围 [0, 25] °C 内且不为 NaN，否则整栋建筑进入隔离表 | blocks | PASS（隔离 0 栋） |
+| 掩码泄漏：室内格点紧邻建筑外部（0 °C）而非墙体 | blocks | **WARN：3,851 栋（84%）** |
+| **Spark 汇总 vs 仿真脚本的 `summary_stats()`，逐栋比对** | reconcile | **4,571/4,571 一致，最大绝对误差 6.7×10⁻¹⁴（阈值 1×10⁻⁶）** |
+
+`dq_results` 共 345 行：314 PASS，31 WARN，0 FAIL。
+
+**和课程部分的结果交叉验证：** [results/gpu_results.csv](results/gpu_results.csv) 是课程部分在 GPU 上跑出的结果，和数仓里的 4,571 栋逐栋对比，平均温度差异中位数为 0.018 °C，最大 0.076 °C。差异来自停止条件：课程的 GPU 版本（如 [e8.py](simulation/e8.py)）固定跑满 2 万次迭代，这里每 100 次迭代检查一次残差，低于 atol = 1e-4 就停止。两边的结论一致：至少一半面积高于 18 °C 的建筑分别是 813 栋和 804 栋，至少一半面积低于 15 °C 的分别是 2,460 栋和 2,471 栋。
 
 > 掩码泄漏这一项最初是写成 FAIL 的："室内温度必须在 5–25 °C 之间（承重墙最冷 5 °C）"。结果第一次跑就把 20 栋里的 16 栋隔离了。排查后发现，部分室内格点直接挨着建筑外部（固定为 0 °C）而不是挨着墙，参考实现本身就会在这些地方算出低于 5 °C 的温度。也就是说，这是数据本身的特征，不是 bug。于是把物理范围修正为 [0, 25]，并把这种情况改为 WARN 单独统计。
 
@@ -175,28 +182,34 @@ flowchart LR
 
 结论（如实记录）：
 
-1. **单机上 Spark 没有超过 Pandas。** 在全量规模（约 4,600 栋）下，Spark 仍比单进程 Pandas 慢 16%。Spark 有大约 6 s 的固定开销（JVM 启动、任务调度、Arrow 序列化），差距从 20 栋时的 30 多倍缩小到 4,600 栋时的 1.16 倍。用 1,000 和 4,600 栋两个点做线性外推，Spark 每栋的边际成本略低（6.75 ms，Pandas 为 7.49 ms），在这台笔记本上大约要到 1.2 万栋才会持平，已经超过了全量数据集的规模。Spark 真正的优势在于数据超出单机内存或需要多节点时；本项目的全量原始层约 2.4 GB，一台机器装得下。
+1. **单机上 Spark 没有超过 Pandas。** 在全量规模（约 4,600 栋）下，Spark 仍比单进程 Pandas 慢 16%。Spark 有大约 6 s 的固定开销（JVM 启动、任务调度、Arrow 序列化），差距从 20 栋时的 30 多倍缩小到 4,600 栋时的 1.16 倍。用 1,000 和 4,600 栋两个点做线性外推，Spark 每栋的边际成本略低（6.75 ms，Pandas 为 7.49 ms），在这台笔记本上大约要到 1.2 万栋才会持平，已经超过了全量数据集的规模。Spark 真正的优势在于数据超出单机内存或需要多节点时；本项目全量真实原始层为 2.6 GB，一台机器装得下。
 2. **按文件读取比按行读取快 2.0 倍（76.6 s → 39.0 s）。** 按行读取时，由 JVM 读取并解压每栋 2 MB 的温度场，再通过 Arrow 发送给 Python worker，相当于在进程之间搬运约 9.6 GB 数据。按文件读取时，Spark 只分发 `(文件, row group)` 任务单元，由 Python worker 直接用 pyarrow 读取。按 row group 而不是按文件切分，可以避免大文件导致的任务倾斜。
 3. **核数不是越多越好。** 在这台机器上，用 multiprocessing 实测：4 进程比 1 进程快 3.3 倍，8 进程反而更慢，因为能效核会拖后腿。因此默认配置为 `local[4,3]`。逗号后的 3 表示每个任务最多尝试 3 次：本地模式默认不重试，一个 Python worker 崩溃就会让整个作业失败，这个问题在测试中确实出现过。
 
 ### 分区方案对比
 
-数据为 48 万行区块表和 4,600 行汇总表，结果见 [partition_bench.csv](benchmarks/results/partition_bench.csv)，查询语句见 [warehouse/queries.sql](warehouse/queries.sql)。
+查询语句见 [warehouse/queries.sql](warehouse/queries.sql)。同一批查询在两份数据上各测了一次：
+
+- **全量真实数据**：54 万行区块表、4,571 行汇总表，每批 200 栋，结果见 [partition_bench.csv](benchmarks/results/partition_bench.csv)。
+- **复制数据**：48 万行区块表，每批只有 5 栋，结果见 [partition_bench_replicated.csv](benchmarks/results/partition_bench_replicated.csv)。
 
 | 查询 | 不分区 | 按 batch_id 分区 | 按 temp_band 分区 |
 |---|---:|---:|---:|
-| q3 温暖建筑中的冷区块（全表扫描 + 过滤） | 114 ms（3 个文件） | 989 ms（920 个文件） | 168 ms（裁剪生效） |
-| q4 大户型热力图（全表扫描） | 153 ms | 980 ms | 132 ms |
-| q5 单个批次（`batch_id = 7`） | 140 ms | 115 ms（裁剪生效） | 108 ms |
+| q3 温暖建筑中的冷区块（全表扫描 + 过滤） | 59 ms | 65 ms（23 个文件） | 52 ms（裁剪生效） |
+| q4 大户型热力图（全表扫描） | 106 ms | 87 ms | 85 ms |
+| q5 单个批次（`batch_id = 7`） | 55 ms | 45 ms（裁剪生效） | 62 ms |
+| *复制数据：q3，按 batch_id 分区* | *114 ms（3 个文件）* | *989 ms（920 个文件）* | *168 ms* |
 
-- **小文件问题，实测：** 复制数据集每批只有 5 栋建筑，按 `batch_id` 分区后产生 920 个小文件，全表扫描慢了约 8.7 倍。真实数据每批 200 栋，只有 23 个分区。同理，每个写入任务都先 `repartition('batch_id')`，保证每个分区只有一个文件。
-- **在这个数据量下，分区裁剪对延迟几乎没有影响**，查询时间主要是固定开销。按 `batch_id` 分区的真正价值在于增量写入时的幂等覆盖，而不是查询加速。4,600 行的汇总表完全不需要分区。
+- **小文件问题，实测：** 复制数据集每批只有 5 栋建筑，按 `batch_id` 分区后产生 920 个小文件，全表扫描慢了约 8.7 倍。真实数据每批 200 栋，只有 23 个文件，全表扫描和不分区基本一样快（65 ms 对 59 ms）。所以批次大小定为 200 栋，而不是更小；并且每个写入任务都先 `repartition('batch_id')`，保证每个分区只有一个文件。
+- **在这个数据量下，分区裁剪对延迟影响很小**（q5 快了约 18%），查询时间主要是固定开销。按 `batch_id` 分区的真正价值在于增量写入时的幂等覆盖，而不是查询加速。4,571 行的汇总表完全不需要分区。
 
 ### 调度（Airflow，Docker）
 
 | 指标 | 实测 |
 |---|---|
-| DAG 端到端（20 栋，4 个批次，含 Numba 仿真检查） | 2 分 26 秒 |
+| **全量 DAG 端到端（4,571 栋，23 个批次，2.6 GB 原始层）** | **2 分 50 秒**，各表行数与本地运行完全一致 |
+| 本地 CLI `etl.run all`，全量 | 59 s（validate 19 s，blocks 19 s，convergence 7 s，summary + reconcile + commit 4 s） |
+| DAG 端到端（20 栋样例，4 个批次，含 Numba 仿真） | 2 分 26 秒 |
 | 无新批次时重新触发 | 所有 Spark 任务被跳过（ShortCircuit） |
 | 只修改一个批次后重跑 | 只重新处理该批次；各表行数不变，无重复行 |
 
@@ -213,13 +226,17 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 PYTHONPATH=. .venv/bin/python -m etl.run all          # 只处理新增或有变化的批次
 PYTHONPATH=. .venv/bin/python -m pytest tests
 
-# 3) 全量仿真（DTU HPC）
-bsub < simulation/export_job.sh                      # 23 个数组任务，每个任务 200 栋
+# 3) 全量仿真（DTU HPC，在仓库根目录执行）
+bash simulation/setup_gpu_env.sh                     # 只需一次，在 GPU 节点上建 ~/venv-gpu（numba-cuda）
+python simulation/diagnose_cuda.py                   # 可选：逐步检查 CUDA 环境
+mkdir -p logs && bsub < simulation/export_job.sh     # 23 个数组任务，每个任务 200 栋
+#    拷回本地：rsync -av --partial <user>@login.hpc.dtu.dk:~/Python-HPC/data/landing/ data/landing/
+#    在 Airflow 里手动触发并设 {"simulate_sample": false}，或者直接跑 etl.run all
 
 # 4) 复现性能结果
 PYTHONPATH=. .venv/bin/python benchmarks/make_scaled.py --factor 10 50 230
 PYTHONPATH=. .venv/bin/python benchmarks/spark_vs_pandas.py --datasets data/landing data/scaled/x{10,50,230}/landing
-PYTHONPATH=. .venv/bin/python benchmarks/partition_bench.py --input data/scaled/_bench_out/spark_files
+PYTHONPATH=. .venv/bin/python benchmarks/partition_bench.py --input data/lake/dw   # 全量真实数仓
 .venv/bin/python benchmarks/plot.py
 ```
 
@@ -234,6 +251,9 @@ PYTHONPATH=. .venv/bin/python benchmarks/partition_bench.py --input data/scaled/
 | `Repetition level histogram size mismatch` | landing 文件由 pyarrow 20 写出，Airflow 镜像里的 pyarrow 19 读不了新版 Parquet 统计信息 | 读写两端固定为同一版本 |
 | 复制数据集多出一个 `batch_id` 列 | 当路径中包含 `batch_id=…` 时，`pq.read_table(path)` 会自动加上 Hive 分区列 | 改用 `ParquetFile.read()` |
 | 偶发 `Python worker exited unexpectedly` | 本地模式默认不重试失败的任务 | 设置 `local[N,3]`，并开启 faulthandler |
+| HPC 上 23 个 GPU 任务全部 segfault（退出码 139） | 同一进程里先后用 CuPy 和 Numba 创建 CUDA 上下文会冲突 | CUDA 后端只用 Numba，残差也改成 Numba kernel（共享内存归约 + `atomic.max`） |
+| 去掉 CuPy 后仍然 segfault，连课程自己的 e8.py 也崩溃 | 课程环境的 Numba 0.58.1 与节点上更新后的 CUDA 驱动不兼容（[diagnose_cuda.py](simulation/diagnose_cuda.py) 定位到：活动上下文的设备号显示为 254，而节点只有 1 块 GPU） | 用 [setup_gpu_env.sh](simulation/setup_gpu_env.sh) 建独立 venv，装 `numba-cuda[cu12]`，它自带 CUDA 12 运行库 |
+| numba-cuda 报 `TypingError: shared.array(int64, ...)` | 新版类型系统要求共享内存数组的大小是编译期常量，kernel 内的 `TPB * TPB` 被当成运行时值 | 改成模块级常量 `BLOCK_THREADS`，dtype 用 `np.float64` |
 
 ## 仓库结构
 
