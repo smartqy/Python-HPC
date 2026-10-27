@@ -172,3 +172,15 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# ETL extension
+.DS_Store
+data/landing/
+data/lake/
+data/scaled/
+metastore_db/
+derby.log
+spark-warehouse/
+airflow-logs/
+data/lake-docker/
+benchmarks/results/*.log

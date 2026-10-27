@@ -1,0 +1,83 @@
+# Single-machine stack: Postgres (Airflow + Hive Metastore DB), Hive Metastore, Airflow.
+# Spark runs in local mode inside the Airflow container; data lives in ./data on the host.
+#   docker compose up -d --build      -> Airflow UI on http://localhost:8080 (admin / admin)
+
+x-project-volume: &project-volume
+  - ./:/opt/project
+
+services:
+  postgres:
+    image: postgres:16.4
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 20
+
+  hive-metastore:
+    build: docker/hive
+    platform: linux/amd64
+    environment:
+      HADOOP_CLIENT_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+        -Dhive.metastore.warehouse.dir=file:///opt/project/data/lake-docker/warehouse
+    # Initialise the schema only on first start, so restarts don't fail on an existing schema.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        schematool -dbType postgres -info > /dev/null 2>&1 || schematool -dbType postgres -initSchema
+        exec hive --service metastore
+    volumes: *project-volume   # same path as in Airflow so table LOCATIONs resolve in both
+    ports:
+      - "9083:9083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9083'"]
+      interval: 10s
+      retries: 30
+      start_period: 60s
+
+  airflow:
+    build: docker/airflow
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/dags
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      PROJECT_DIR: /opt/project
+      PYTHONPATH: /opt/project
+      DATA_ROOT: /opt/project/data
+      LAKE_DIR: /opt/project/data/lake-docker
+      HIVE_METASTORE_URIS: thrift://hive-metastore:9083
+      SPARK_DRIVER_MEMORY: 2g
+      NUMBA_CACHE_DIR: /tmp/numba
+    volumes: *project-volume
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hive-metastore:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Admin --lastname User \
+          --role Admin --email admin@example.com || true
+        airflow scheduler &
+        exec airflow webserver
+
+volumes:
+  pgdata:

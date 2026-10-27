@@ -1,0 +1,8 @@
+# Local (non-Docker) environment for the ETL. Spark 4 needs Java 17 or 21.
+numpy>=1.26,<2.3
+numba==0.61.2
+pandas==2.2.3
+pyarrow==20.0.0
+pyspark==4.0.1
+matplotlib
+pytest

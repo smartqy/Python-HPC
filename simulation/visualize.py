@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 # 获取当前脚本所在的目录
 script_dir = os.path.dirname(os.path.abspath(__file__))
-base_path = os.path.join(script_dir, "file")
+base_path = os.path.join(script_dir, "..", "data", "sample")
 
 # 假设数据路径和楼栋 ID 已知
 building_ids = ['694','986','1878','1869','3171','4485','5158','5971','6233','6452','7025','7987','8264','9648','9991','10000','10535','29753','49314','50814']
