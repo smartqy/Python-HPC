@@ -15,6 +15,7 @@ Usage:
     python simulation/export.py --data-dir /dtu/.../modified_swiss_dwellings --batch-id 3 --backend cuda
 """
 import argparse
+import faulthandler
 import shutil
 import sys
 import time
@@ -22,8 +23,10 @@ from os.path import join
 from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
+
+# pyarrow is imported lazily (see schemas()/write_table): with the CUDA backend the Numba CUDA
+# context must be created before other native libraries are loaded, otherwise cuda.to_device
+# segfaults on the DTU A100 nodes (seen first with CuPy, see CudaSolver).
 
 SIZE = 512
 MAX_ITER = 20_000
@@ -196,6 +199,9 @@ def simulate(u0, interior_mask, backend, max_iter=MAX_ITER, atol=ABS_TOL, log_ev
 
 
 def write_table(rows, schema, out_dir, table, batch_id):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     path = Path(out_dir) / table / f"batch_id={batch_id:05d}"
     if path.exists():
         shutil.rmtree(path)  # overwrite the batch: re-running is idempotent
@@ -206,30 +212,34 @@ def write_table(rows, schema, out_dir, table, batch_id):
     return tbl.num_rows
 
 
-RAW_SCHEMA = pa.schema([
-    ('building_id', pa.string()),
-    ('grid', pa.binary()),       # float64[512*512], C order, final temperature field
-    ('mask', pa.binary()),       # np.packbits of the 512x512 interior mask
-])
-CONV_SCHEMA = pa.schema([
-    ('building_id', pa.string()),
-    ('iter', pa.int32()),
-    ('residual', pa.float64()),
-    ('mean_temp', pa.float64()),
-    ('elapsed_ms', pa.float64()),
-])
-META_SCHEMA = pa.schema([
-    ('building_id', pa.string()),
-    ('backend', pa.string()),
-    ('n_iter', pa.int32()),
-    ('converged', pa.bool_()),
-    ('run_seconds', pa.float64()),
-    ('ref_area_cells', pa.int64()),
-    ('ref_mean_temp', pa.float64()),
-    ('ref_std_temp', pa.float64()),
-    ('ref_pct_above_18', pa.float64()),
-    ('ref_pct_below_15', pa.float64()),
-])
+def schemas():
+    import pyarrow as pa
+
+    raw_grid = pa.schema([
+        ('building_id', pa.string()),
+        ('grid', pa.binary()),       # float64[512*512], C order, final temperature field
+        ('mask', pa.binary()),       # np.packbits of the 512x512 interior mask
+    ])
+    convergence = pa.schema([
+        ('building_id', pa.string()),
+        ('iter', pa.int32()),
+        ('residual', pa.float64()),
+        ('mean_temp', pa.float64()),
+        ('elapsed_ms', pa.float64()),
+    ])
+    run_meta = pa.schema([
+        ('building_id', pa.string()),
+        ('backend', pa.string()),
+        ('n_iter', pa.int32()),
+        ('converged', pa.bool_()),
+        ('run_seconds', pa.float64()),
+        ('ref_area_cells', pa.int64()),
+        ('ref_mean_temp', pa.float64()),
+        ('ref_std_temp', pa.float64()),
+        ('ref_pct_above_18', pa.float64()),
+        ('ref_pct_below_15', pa.float64()),
+    ])
+    return {'raw_grid': raw_grid, 'convergence': convergence, 'run_meta': run_meta}
 
 
 def run_batch(data_dir, out_dir, building_ids, batch_id, backend, max_iter, atol):
@@ -252,10 +262,11 @@ def run_batch(data_dir, out_dir, building_ids, batch_id, backend, max_iter, atol
         print(f"  [{batch_id:05d}] {bid}: {n_iter} iters ({'converged' if converged else 'max_iter'}), "
               f"{run_seconds:.2f} s, mean={stats['mean_temp']:.3f}", flush=True)
 
+    sch = schemas()
     counts = {
-        'raw_grid': write_table(raw, RAW_SCHEMA, out_dir, 'raw_grid', batch_id),
-        'convergence': write_table(conv, CONV_SCHEMA, out_dir, 'convergence', batch_id),
-        'run_meta': write_table(meta, META_SCHEMA, out_dir, 'run_meta', batch_id),
+        'raw_grid': write_table(raw, sch['raw_grid'], out_dir, 'raw_grid', batch_id),
+        'convergence': write_table(conv, sch['convergence'], out_dir, 'convergence', batch_id),
+        'run_meta': write_table(meta, sch['run_meta'], out_dir, 'run_meta', batch_id),
     }
     print(f"batch {batch_id:05d}: {len(building_ids)} buildings in {time.perf_counter() - t_batch:.1f} s, rows={counts}")
 
@@ -274,6 +285,13 @@ def main():
     p.add_argument('--atol', type=float, default=ABS_TOL)
     p.add_argument('--skip-existing', action='store_true', help='do not re-run batches already in --out-dir')
     args = p.parse_args()
+
+    faulthandler.enable()  # a segfault prints the Python stack instead of dying silently
+    if args.backend == 'cuda':
+        from numba import cuda
+        ctx = cuda.current_context()  # create the CUDA context before pyarrow is loaded
+        name = getattr(ctx.device, 'name', b'unknown device')
+        print(f"CUDA context on {name.decode() if isinstance(name, bytes) else name}", flush=True)
 
     with open(join(args.data_dir, 'building_ids.txt')) as f:
         building_ids = f.read().splitlines()
