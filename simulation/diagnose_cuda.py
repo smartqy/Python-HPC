@@ -41,14 +41,19 @@ def devices():
 
 
 def active_devnum():
-    from numba.cuda.cudadrv.driver import driver
-    with driver.get_active_context() as ac:
-        return None if not ac else ac.devnum
+    # Driver internals differ between Numba's built-in CUDA target and numba-cuda; this check is
+    # informational, so report instead of failing when they are not available.
+    try:
+        from numba.cuda.cudadrv.driver import driver
+        with driver.get_active_context() as ac:
+            return None if not ac else ac.devnum
+    except (ImportError, AttributeError) as e:
+        return f'n/a ({type(e).__name__})'
 
 
 step('1 list GPUs (cuda.gpus)', devices)
 step('2 create context: cuda.current_context()', lambda: str(cuda.current_context()))
-step('3 active context devnum vs len(cuda.gpus)', lambda: (active_devnum(), len(cuda.gpus.lst)))
+step('3 active context devnum vs number of GPUs', lambda: (active_devnum(), len(devices())))
 step('4 to_device(np.zeros(1))', lambda: cuda.to_device(np.zeros(1)).shape)
 u = np.zeros((514, 514))
 step('5 np.load one building', lambda: u.__setitem__((slice(1, -1), slice(1, -1)),
@@ -57,7 +62,7 @@ mask = step('6 np.load mask', lambda: np.load(os.path.join(DATA, '10000_interior
 step('7 to_device(514x514 float64)', lambda: cuda.to_device(u).shape)
 step('8 to_device(mask)', lambda: cuda.to_device(mask).shape)
 step('9 import pyarrow.parquet', lambda: __import__('pyarrow.parquet').__version__)
-step('10 active context devnum vs len(cuda.gpus)', lambda: (active_devnum(), len(cuda.gpus.lst)))
+step('10 active context devnum vs number of GPUs', lambda: (active_devnum(), len(devices())))
 step('11 to_device again after pyarrow', lambda: cuda.to_device(u).shape)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
