@@ -16,6 +16,7 @@ Usage:
 """
 import argparse
 import shutil
+import sys
 import time
 from os.path import join
 from pathlib import Path
@@ -28,6 +29,7 @@ SIZE = 512
 MAX_ITER = 20_000
 ABS_TOL = 1e-4
 LOG_EVERY = 100
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for cuda_kernels
 
 
 def load_data(load_dir, bid):
@@ -138,52 +140,40 @@ def _compile_numba():
 
 
 class CudaSolver:
-    """Numba CUDA kernel from e8.py. The convergence check (a GPU reduction via CuPy)
-    only runs at the end of each chunk, so n_iter is rounded up to a multiple of LOG_EVERY."""
+    """Numba CUDA kernel from e8.py (kernels in cuda_kernels.py). The convergence check runs
+    only at the end of each chunk, so n_iter is rounded up to a multiple of LOG_EVERY.
+
+    Numba only, no CuPy: on the DTU A100 nodes (conda env 02613, CUDA 11.8) importing CuPy and
+    initialising a CUDA context before Numba creates its own makes cuda.to_device segfault.
+    The residual is therefore a Numba reduction kernel instead of a CuPy expression."""
 
     def __init__(self, u, interior_mask, atol):
         import math
-        import cupy as cp
         from numba import cuda
-        global _cuda_kernel
-        if _cuda_kernel is None:
-            _cuda_kernel = _compile_cuda()
-        self.cp = cp
+        import cuda_kernels as K
+        self.K = K
+        u = np.ascontiguousarray(u)
         self.d_old = cuda.to_device(u)
         self.d_new = cuda.to_device(u)
-        self.d_mask = cuda.to_device(interior_mask)
+        self.d_mask = cuda.to_device(np.ascontiguousarray(interior_mask))
+        self.d_delta = cuda.device_array(1, dtype=np.float64)
         self.atol = atol
-        self.tpb = (16, 16)
-        self.bpg = (math.ceil(u.shape[0] / 16), math.ceil(u.shape[1] / 16))
+        self.tpb = (K.TPB, K.TPB)
+        self.bpg = (math.ceil(u.shape[0] / K.TPB), math.ceil(u.shape[1] / K.TPB))
 
     def run(self, n):
-        cp = self.cp
+        K = self.K
         for _ in range(n):
-            _cuda_kernel[self.bpg, self.tpb](self.d_old, self.d_new, self.d_mask)
+            K.jacobi_kernel[self.bpg, self.tpb](self.d_old, self.d_new, self.d_mask)
             self.d_old, self.d_new = self.d_new, self.d_old
-        # Zero-copy views of the Numba device arrays; d_new now holds the previous iterate.
-        a, b = cp.asarray(self.d_old), cp.asarray(self.d_new)
-        delta = float(cp.abs(a - b).max())
+        # d_old is the latest iterate and d_new the one before; fixed cells are equal in both.
+        self.d_delta.copy_to_device(np.zeros(1))
+        K.max_abs_diff_kernel[self.bpg, self.tpb](self.d_old, self.d_new, self.d_delta)
+        delta = float(self.d_delta.copy_to_host()[0])
         return n, delta, delta < self.atol
 
     def grid(self):
         return self.d_old.copy_to_host()
-
-
-_cuda_kernel = None
-
-
-def _compile_cuda():
-    from numba import cuda
-
-    @cuda.jit
-    def jacobi_kernel(u_old, u_new, interior_mask):
-        i, j = cuda.grid(2)
-        n, m = u_old.shape
-        if 0 < i < n - 1 and 0 < j < m - 1 and interior_mask[i - 1, j - 1]:
-            u_new[i, j] = 0.25 * (u_old[i, j - 1] + u_old[i, j + 1] + u_old[i - 1, j] + u_old[i + 1, j])
-
-    return jacobi_kernel
 
 
 BACKENDS = {'numpy': NumpySolver, 'numba': NumbaSolver, 'cuda': CudaSolver}

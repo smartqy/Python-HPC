@@ -61,3 +61,29 @@ def test_numba_matches_numpy_bitwise():
     a, na, _, _ = simulate(u0, mask, 'numpy', max_iter=250)
     b, nb, _, _ = simulate(u0, mask, 'numba', max_iter=250)
     assert na == nb and np.array_equal(a, b)
+
+
+CUDA_SIM_CHECK = '''
+import sys; sys.path.insert(0, sys.argv[1])
+import numpy as np, export as E
+d = np.load(sys.argv[2] + '/10000_domain.npy'); m = np.load(sys.argv[2] + '/10000_interior.npy')
+r, c = np.argwhere(m).mean(0).astype(int)
+u0 = np.zeros((66, 66)); u0[1:-1, 1:-1] = d[r-32:r+32, c-32:c+32]
+mc = m[r-32:r+32, c-32:c+32]
+ref, cu = E.NumpySolver(u0, mc, 0.0), E.CudaSolver(u0, mc, 0.0)
+for n in (1, 9):
+    _, d_ref, _ = ref.run(n); _, d_cu, _ = cu.run(n)
+    assert np.array_equal(ref.grid(), cu.grid()) and d_ref == d_cu, (n, d_ref, d_cu)
+assert 'cupy' not in sys.modules
+'''
+
+
+def test_cuda_backend_matches_numpy_in_simulator():
+    """Runs the CUDA kernels on Numba's CPU simulator (no GPU needed) in a subprocess, since the
+    simulator must be enabled before numba is imported."""
+    import os
+    import subprocess
+    pytest.importorskip('numba')
+    res = subprocess.run([sys.executable, '-c', CUDA_SIM_CHECK, str(REPO / 'simulation'), str(REPO / 'data' / 'sample')],
+                         env={**os.environ, 'NUMBA_ENABLE_CUDASIM': '1'}, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr[-2000:]
